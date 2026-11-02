@@ -10,6 +10,13 @@
 #include <signal.h>
 #include <unistd.h>
 #include <setjmp.h>
+#if __has_include(<valgrind/valgrind.h>)
+# include <valgrind/valgrind.h>
+#else
+# define RUNNING_ON_VALGRIND 0
+# define VALGRIND_COUNT_ERRORS 0
+# define VALGRIND_PRINTF(...) 0
+#endif
 
 /* prototypes du sujet: le tester compile meme si libft.h est incomplet */
 typedef struct s_list
@@ -113,8 +120,53 @@ static void	logmsg(const char *fmt, ...)
 	va_end(ap);
 }
 
+static char			g_detail[4096];
+static int			g_active;	/* le cas courant a ete execute (pas saute) */
+
+/* mode verbeux (sardine <fonction>-test): chaque entree testee est affichee sur stderr */
+static int	verbose(void)
+{
+	return (getenv("TESTER_VERBOSE") && g_case > g_replay);
+}
+
+static void	detail(const char *fmt, ...)
+{
+	va_list	ap;
+	size_t	l = strlen(g_detail);
+
+	va_start(ap, fmt);
+	vsnprintf(g_detail + l, sizeof g_detail - l, fmt, ap);
+	va_end(ap);
+}
+
+static unsigned int	g_vg_errs;
+static int			g_vg_tagged;
+
+/* sous valgrind: ecrit dans son log l'entree du cas qui vient de provoquer une erreur */
+static void	vg_tag(void)
+{
+	unsigned int	e;
+
+	if (!RUNNING_ON_VALGRIND)
+		return ;
+	e = VALGRIND_COUNT_ERRORS;
+	if (e > g_vg_errs && g_vg_tagged++ < 5)
+		VALGRIND_PRINTF("[VALGRIND] erreur pendant le test: %s\n", g_cur);
+	g_vg_errs = e;
+}
+
 static void	case_end(void)
 {
+	if (g_active)
+		vg_tag();
+	if (g_active && verbose())
+	{
+		fprintf(stderr, "      %s %s\n", g_case_ko ? "\e[31m✘\e[0m" : "\e[32m✔\e[0m", g_cur);
+		if (g_case_ko)
+			fprintf(stderr, "\e[2m%s\e[0m", g_detail);
+	}
+	g_detail[0] = 0;
+	g_active = 0;
 	g_failed += g_case_ko;
 	g_case_ko = 0;
 }
@@ -132,6 +184,7 @@ static int	case_begin(const char *fmt, ...)
 	va_start(ap, fmt);
 	vsnprintf(g_cur, sizeof g_cur, fmt, ap);
 	va_end(ap);
+	g_active = 1;
 	alarm(getenv("TESTER_NOLOG") ? 20 : 3);
 	return (0);
 }
@@ -140,8 +193,9 @@ static int	case_begin(const char *fmt, ...)
 #define ONCE for (int once_ = 1; once_; once_ = 0)
 #define T(...) if (case_begin(__VA_ARGS__)) continue
 #define CHECK(cond, ...) do { if (!(cond)) { g_case_ko = 1; \
-	logmsg("[KO] %s   (tester.c:%d)\n     ", g_cur, __LINE__); \
-	logmsg(__VA_ARGS__); logmsg("\n\n"); } } while (0)
+	logmsg("[KO] %s   (%s:%d)\n     ", g_cur, __FILE__, __LINE__); \
+	logmsg(__VA_ARGS__); logmsg("\n\n"); \
+	if (verbose()) { detail("          "); detail(__VA_ARGS__); detail("\n"); } } } while (0)
 
 static void	on_signal(int sig)
 {
@@ -149,6 +203,11 @@ static void	on_signal(int sig)
 		logmsg("[TIMEOUT] boucle infinie ? pendant le test: %s\n\n", g_cur);
 	else
 		logmsg("[CRASH] %s pendant le test: %s\n\n", strsignal(sig), g_cur);
+	vg_tag();
+	if (verbose())
+		fprintf(stderr, "      \e[31m💥 %s\e[0m %s\n", sig == SIGALRM ? "TIMEOUT" : strsignal(sig), g_cur);
+	g_active = 0;
+	g_detail[0] = 0;
 	g_crashes++;
 	g_replay = g_case;
 	if (g_case == 0)
@@ -156,6 +215,43 @@ static void	on_signal(int sig)
 	else if (g_nskip < 256)
 		g_skip[g_nskip++] = g_case;
 	siglongjmp(g_jmp, 1);
+}
+
+/* ---------- malloc/free interceptes (-Wl,--wrap) pour le mode strict ---------- */
+
+void		*__real_malloc(size_t n);
+void		__real_free(void *p);
+static int	g_track;	/* suivi actif pendant l'appel a la fonction testee */
+static int	g_fail_at;	/* numero du malloc qui doit renvoyer NULL (0 = aucun) */
+static int	g_nalloc;
+static int	g_in_f;		/* malloc fait par une fonction du tester (f de lstmap): jamais en echec */
+static struct { void *p; size_t n; }	g_live[8192];
+static int	g_nlive;
+
+void	*__wrap_malloc(size_t n)
+{
+	void	*p;
+
+	if (g_track && !g_in_f && ++g_nalloc == g_fail_at)
+		return (NULL);
+	p = __real_malloc(n);
+	if (g_track && p && g_nlive < 8192)
+	{
+		g_live[g_nlive].p = p;
+		g_live[g_nlive++].n = n;
+	}
+	return (p);
+}
+
+void	__wrap_free(void *p)
+{
+	for (int i = 0; g_track && i < g_nlive; i++)
+		if (g_live[i].p == p)
+		{
+			g_live[i] = g_live[--g_nlive];
+			break ;
+		}
+	__real_free(p);
 }
 
 /* ---------- helpers d'affichage ---------- */
@@ -1012,8 +1108,11 @@ static void	t_ft_lstiter(void)
 
 static void	*map_double(void *p)
 {
-	int	*v = malloc(sizeof *v);
+	int	*v;
 
+	g_in_f = 1;
+	v = malloc(sizeof *v);
+	g_in_f = 0;
 	if (v)
 		*v = *(int *)p * 2;
 	return (v);
@@ -1043,6 +1142,8 @@ static void	t_ft_lstmap(void)
 		CHECK(ft_lstmap(NULL, map_double, del_count) == NULL, "attendu: NULL");
 	}
 }
+
+#include "strict.c"
 
 /* ---------- main ---------- */
 
@@ -1081,8 +1182,13 @@ int	main(int ac, char **av)
 		g_case_ko = 0;
 		g_failed = 0;
 		srand(42);
+		g_track = 0;
 		if (g_nskip < 256)
+		{
 			g_tests[i].test();
+			if (getenv("TESTER_STRICT"))
+				run_strict(g_fn);
+		}
 		case_end();
 		alarm(0);
 		if (g_log)

@@ -2,6 +2,13 @@
 # usage: sardine [chemin_vers_libft] [ft_fonction ...]
 #   sans chemin: le dossier courant s'il contient libft.h, sinon le dossier parent du tester
 SELF=$(realpath "$0")
+
+# --strict (ou -s): tests plus durs (malloc qui echoue, taille exacte des allocations, fuzzing, grosses entrees)
+ARGS=()
+for a in "$@"; do
+	case $a in --strict|-s|strict) export TESTER_STRICT=1 ;; *) ARGS+=("$a") ;; esac
+done
+set -- "${ARGS[@]}"
 DIR=$(dirname "$SELF")
 
 if [ -n "$1" ] && [ -d "$1" ]; then LIBFT=$(realpath "$1"); shift
@@ -32,6 +39,7 @@ cat <<'EOF'
 EOF
 echo "${N}"
 echo "  ${D}libft :${N} $LIBFT"
+[ -n "$TESTER_STRICT" ] && echo "  ${R}${B}MODE STRICT${N} ${D}— malloc qui echoue, taille des allocations, fuzzing, grosses entrees${N}"
 [ -n "$ALIAS_ADDED" ] && echo "  ${Y}alias 'sardine' ajoute — ouvre un nouveau terminal ou fais: source ~/.zshrc${N}"
 echo
 
@@ -40,23 +48,25 @@ check() { [ "$2" = 1 ] && printf "    %s %s\n" "$OKS" "$1" || printf "    %s %s\
 
 [ -f "$LIBFT/libft.h" ] || { echo "  $KOS libft.h introuvable dans $LIBFT"; exit 1; }
 
-section "Makefile & regles"
+TARGETED=$#
+[ $TARGETED = 0 ] && section "Makefile & regles"
 make -C "$LIBFT" fclean >/dev/null 2>&1
 if ! make -C "$LIBFT" >/dev/null 2>"$DIR/.make.log"; then
 	echo "    $KOS make a echoue:"; sed 's/^/      /' "$DIR/.make.log"; exit 1
 fi
 [ -f "$LIBFT/libft.a" ] || { echo "    $KOS libft.a absent apres make"; exit 1; }
+grep -qE "^bonus\s*:" "$LIBFT/Makefile" && make -C "$LIBFT" bonus >/dev/null 2>&1
+nm "$LIBFT/libft.a" 2>/dev/null | awk -f "$DIR/externs.awk" > "$DIR/.externs"
+# fonctions ciblees: on saute les verifs Makefile / README pour aller vite
+if [ $TARGETED = 0 ]; then
 before=$(stat -c %Y "$LIBFT/libft.a"); sleep 1
 make -C "$LIBFT" >/dev/null 2>&1
 check "pas de relink" "$([ "$before" = "$(stat -c %Y "$LIBFT/libft.a")" ] && echo 1)"
 for rule in '\$\(NAME\)' all clean fclean re; do
 	check "regle ${rule//\\/}" "$(grep -qE "^${rule}\s*:" "$LIBFT/Makefile" && echo 1)"
 done
+check "fonctions externes autorisees par le sujet (detail par fonction plus bas)" "$([ -s "$DIR/.externs" ] || echo 1)"
 check "flags -Wall -Wextra -Werror" "$(grep -q -- -Wall "$LIBFT/Makefile" && grep -q -- -Wextra "$LIBFT/Makefile" && grep -q -- -Werror "$LIBFT/Makefile" && echo 1)"
-grep -qE "^bonus\s*:" "$LIBFT/Makefile" && make -C "$LIBFT" bonus >/dev/null 2>&1
-forbidden=$(nm -u "$LIBFT/libft.a" 2>/dev/null | awk '{print $2}' | sort -u \
-	| grep -vE '^(ft_.*|malloc|free|write|__stack_chk_fail|_GLOBAL_OFFSET_TABLE_)$')
-check "fonctions externes (malloc, free, write)${forbidden:+ — interdites: $(echo $forbidden)}" "$([ -z "$forbidden" ] && echo 1)"
 if command -v norminette >/dev/null; then
 	check "norminette" "$(norminette "$LIBFT" 2>/dev/null | grep -q Error || echo 1)"
 fi
@@ -75,24 +85,46 @@ if [ -f "$RM" ]; then
 else
 	check "README.md a la racine" 0
 fi
+fi
 
-cc -g -w tester.c -Wl,--whole-archive "$LIBFT/libft.a" -Wl,--no-whole-archive -o tester 2>"$DIR/.make.log" \
+cc -g -w tester.c -Wl,--wrap=malloc -Wl,--wrap=free -Wl,--whole-archive "$LIBFT/libft.a" -Wl,--no-whole-archive -o tester 2>"$DIR/.make.log" \
 	|| { echo "    $KOS compilation du tester echouee:"; sed 's/^/      /' "$DIR/.make.log"; exit 1; }
 
-rm -rf "$ERR"; mkdir -p "$ERR"
 VG=$(command -v valgrind)
 [ -z "$VG" ] && echo "    ${Y}! valgrind absent: pas de verification memoire${N}"
-FUNCS=${*:-$(./tester --list)}
+ALL=$(./tester --list)
+if [ $TARGETED = 0 ]; then
+	FUNCS=$ALL
+	rm -rf "$ERR"
+else
+	# accepte "split", "ft_split" ou "ft_split.c"; "split-test" affiche chaque entree testee
+	FUNCS=""; VFUNCS=" "
+	for a in "$@"; do
+		case $a in *-test) a=${a%-test}; v=1 ;; *) v="" ;; esac
+		a=${a%.c}; a=ft_${a#ft_}
+		[ -n "$v" ] && VFUNCS="$VFUNCS$a "
+		if echo "$ALL" | grep -qx "$a"; then FUNCS="$FUNCS $a"; rm -f "$ERR/$a.txt"
+		else echo "  $KOS fonction inconnue: $a"; fi
+	done
+	[ -z "$FUNCS" ] && { echo "  fonctions disponibles:"; echo $ALL | fold -s -w 70 | sed 's/^/    /'; exit 1; }
+	section "Fonctions ciblees"
+fi
+mkdir -p "$ERR"
 ok=0; nb=0
 
 for f in $FUNCS; do
-	case $f in
+	[ $TARGETED = 0 ] && case $f in
 		ft_isalpha) section "Partie 1 — fonctions de la libc" ;;
 		ft_substr) section "Partie 2 — fonctions supplementaires" ;;
 		ft_lstnew) section "Partie 3 — listes chainees" ;;
 	esac
 	nb=$((nb + 1))
-	out=$(timeout 120 ./tester "$f" 2>/dev/null); rc=$?
+	if [[ "$VFUNCS" == *" $f "* ]]; then
+		printf "    ${B}%s${N} ${D}— entrees testees:${N}\n" "$f"
+		out=$(TESTER_VERBOSE=1 timeout 120 ./tester "$f"); rc=$?
+	else
+		out=$(timeout 120 ./tester "$f" 2>/dev/null); rc=$?
+	fi
 	read -r total failed crashes <<< "$out"
 	vg=""
 	case $rc in
@@ -112,19 +144,33 @@ for f in $FUNCS; do
 			./tester "$f" >/dev/null 2>&1
 		if [ $? = 42 ]; then
 			vg="${R}🐟 valgrind KO${N}"
-			{ echo "[VALGRIND] fuite memoire ou acces invalide:"; cat "$DIR/.vg.log"; echo; } >> "$ERR/$f.txt"
+			{
+				# entrees fautives taggees par le tester (VALGRIND_PRINTF), sinon c'est une fuite
+				tags=$(grep -o 'erreur pendant le test: .*' "$DIR/.vg.log" | sed 's/^erreur pendant le test: //')
+				if [ -n "$tags" ]; then
+					echo "$tags" | sed 's/^/[VALGRIND] acces memoire invalide pendant: /'
+				else
+					echo "[VALGRIND] fuite memoire:"
+				fi
+				echo; cat "$DIR/.vg.log"; echo
+			} >> "$ERR/$f.txt"
 		else
 			vg="${G}🐟 mem ok${N}"
 		fi
 	fi
+	bad=$(awk -v f="$f" '$1 == f { print $2 }' "$DIR/.externs" | tr '\n' ' ')
+	if [ -n "$bad" ]; then
+		res="$res ${R}⛔ interdit: ${bad% }${N}"
+		awk -v f="$f" '$1 == f { $1 = ""; print "[INTERDIT] appel a" $0 }' "$DIR/.externs" >> "$ERR/$f.txt"
+	fi
 	[ -f "$ERR/$f.txt" ] || ok=$((ok + 1))
 	printf "    %-17s %s  %s\n" "$f" "$res" "$vg"
 	if [ -f "$ERR/$f.txt" ]; then
-		first=$(grep -m1 -A1 -E '^\[(KO|CRASH|TIMEOUT|MISSING|VALGRIND)' "$ERR/$f.txt" | tr -s ' ' | tr '\n' ' ' | cut -c1-90)
+		first=$(grep -m1 -A1 -E '^\[(KO|CRASH|TIMEOUT|MISSING|VALGRIND|INTERDIT)' "$ERR/$f.txt" | tr -s ' ' | tr '\n' ' ' | cut -c1-90)
 		printf "      ${D}↳ %s${N}\n" "$first"
 	fi
 done
-rm -f "$DIR/.vg.log" "$DIR/.make.log"
+rm -f "$DIR/.vg.log" "$DIR/.make.log" "$DIR/.externs"
 make -C "$LIBFT" fclean >/dev/null 2>&1
 
 section "Resultat"

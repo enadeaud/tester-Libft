@@ -57,6 +57,11 @@ fi
 [ -f "$LIBFT/libft.a" ] || { echo "    $KOS libft.a absent apres make"; exit 1; }
 grep -qE "^bonus\s*:" "$LIBFT/Makefile" && make -C "$LIBFT" bonus >/dev/null 2>&1
 nm "$LIBFT/libft.a" 2>/dev/null | awk -f "$DIR/externs.awk" > "$DIR/.externs"
+# meme fonction definie dans 2 .o (ex: ft_toupper copie dans ft_tolower.c): on le signale et on linke quand meme
+nm -A "$LIBFT/libft.a" 2>/dev/null | awk '$(NF-1) == "T" { split($1, a, ":"); o[$NF] = o[$NF] " " a[2]; n[$NF]++ }
+	END { for (f in n) if (n[f] > 1) print f ":" o[f] }' | while read -r dup; do
+	echo "    $KOS ${dup%%:*} defini plusieurs fois:${dup#*:} (une seule version sera testee)"
+done
 # fonctions ciblees: on saute les verifs Makefile / README pour aller vite
 if [ $TARGETED = 0 ]; then
 before=$(stat -c %Y "$LIBFT/libft.a"); sleep 1
@@ -87,7 +92,7 @@ else
 fi
 fi
 
-cc -g -w tester.c -Wl,--wrap=malloc -Wl,--wrap=free -Wl,--whole-archive "$LIBFT/libft.a" -Wl,--no-whole-archive -o tester 2>"$DIR/.make.log" \
+cc -g -w tester.c -Wl,--allow-multiple-definition -Wl,--wrap=malloc -Wl,--wrap=free -Wl,--whole-archive "$LIBFT/libft.a" -Wl,--no-whole-archive -o tester 2>"$DIR/.make.log" \
 	|| { echo "    $KOS compilation du tester echouee:"; sed 's/^/      /' "$DIR/.make.log"; exit 1; }
 
 VG=$(command -v valgrind)

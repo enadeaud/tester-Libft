@@ -18,6 +18,31 @@
 # define VALGRIND_PRINTF(...) 0
 #endif
 
+/* glibc < 2.38 (ex: Ubuntu 22.04) n'a pas strlcpy/strlcat: reference BSD a la place */
+#if defined(__GLIBC__) && !__GLIBC_PREREQ(2, 38)
+static size_t	strlcpy(char *dst, const char *src, size_t size)
+{
+	size_t	len = strlen(src);
+
+	if (size)
+	{
+		size_t n = len < size - 1 ? len : size - 1;
+		memcpy(dst, src, n);
+		dst[n] = 0;
+	}
+	return (len);
+}
+
+static size_t	strlcat(char *dst, const char *src, size_t size)
+{
+	size_t	dl = strnlen(dst, size);
+
+	if (dl == size)
+		return (size + strlen(src));
+	return (dl + strlcpy(dst + dl, src, size - dl));
+}
+#endif
+
 /* prototypes du sujet: le tester compile meme si libft.h est incomplet */
 typedef struct s_list
 {

@@ -3,3 +3,4 @@ errors/
 .vg.log
 .make.log
 tester.dSYM/
+.externs

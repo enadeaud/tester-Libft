@@ -1223,11 +1223,17 @@ int	main(int ac, char **av)
 			logmsg("[MISSING] %s n'existe pas dans libft.a\n", g_fn);
 			return (2);
 		}
-		signal(SIGSEGV, on_signal);
-		signal(SIGBUS, on_signal);
-		signal(SIGABRT, on_signal);
-		signal(SIGFPE, on_signal);
-		signal(SIGALRM, on_signal);
+		/* pile de secours: sur un stack overflow (recursion infinie) le handler n'aurait plus de place */
+		static char			altstack[1 << 16];
+		stack_t				ss = {.ss_sp = altstack, .ss_size = sizeof altstack};
+		struct sigaction	sa = {.sa_handler = on_signal, .sa_flags = SA_ONSTACK};
+
+		sigaltstack(&ss, NULL);
+		sigaction(SIGSEGV, &sa, NULL);
+		sigaction(SIGBUS, &sa, NULL);
+		sigaction(SIGABRT, &sa, NULL);
+		sigaction(SIGFPE, &sa, NULL);
+		sigaction(SIGALRM, &sa, NULL);
 		/* apres un crash on relance la fonction de test en sautant les cas fautifs */
 		sigsetjmp(g_jmp, 1);
 		g_case = 0;

@@ -10,7 +10,7 @@ BEGIN {
 	for (i in a) ok[a[i], "free"] = 1
 	split("ft_putchar_fd ft_putstr_fd ft_putendl_fd ft_putnbr_fd", a)
 	for (i in a) ok[a[i], "write"] = 1
-	ignore["__stack_chk_fail"] = ignore["_GLOBAL_OFFSET_TABLE_"] = 1
+	ignore["__stack_chk_fail"] = ignore["__stack_chk_guard"] = ignore["_GLOBAL_OFFSET_TABLE_"] = 1
 }
 /:$/ { obj = $0; next }
 NF == 3 && $2 == "T" { def[$3] = obj }

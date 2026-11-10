@@ -19,7 +19,8 @@
 #endif
 
 /* glibc < 2.38 (ex: Ubuntu 22.04) n'a pas strlcpy/strlcat: reference BSD a la place */
-#if defined(__GLIBC__) && !__GLIBC_PREREQ(2, 38)
+#if defined(__GLIBC__)
+# if !__GLIBC_PREREQ(2, 38)
 static size_t	strlcpy(char *dst, const char *src, size_t size)
 {
 	size_t	len = strlen(src);
@@ -41,6 +42,7 @@ static size_t	strlcat(char *dst, const char *src, size_t size)
 		return (size + strlen(src));
 	return (dl + strlcpy(dst + dl, src, size - dl));
 }
+# endif
 #endif
 
 /* prototypes du sujet: le tester compile meme si libft.h est incomplet */
@@ -244,8 +246,33 @@ static void	on_signal(int sig)
 
 /* ---------- malloc/free interceptes (-Wl,--wrap) pour le mode strict ---------- */
 
+#ifdef __APPLE__
+/* macOS n'a pas --wrap: un malloc defini dans l'executable remplace celui de la libc pour la libft (linkee en statique) */
+# include <dlfcn.h>
+# define __wrap_malloc malloc
+# define __wrap_free free
+
+static void	*__real_malloc(size_t n)
+{
+	static void	*(*f)(size_t);
+
+	if (!f)
+		f = (void *(*)(size_t))dlsym(RTLD_NEXT, "malloc");
+	return (f(n));
+}
+
+static void	__real_free(void *p)
+{
+	static void	(*f)(void *);
+
+	if (!f)
+		f = (void (*)(void *))dlsym(RTLD_NEXT, "free");
+	f(p);
+}
+#else
 void		*__real_malloc(size_t n);
 void		__real_free(void *p);
+#endif
 static int	g_track;	/* suivi actif pendant l'appel a la fonction testee */
 static int	g_fail_at;	/* numero du malloc qui doit renvoyer NULL (0 = aucun) */
 static int	g_nalloc;

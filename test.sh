@@ -44,6 +44,11 @@ echo "  ${D}libft :${N} $LIBFT"
 echo
 
 section() { printf "\n  ${B}${C}%s${N}\n  ${D}%s${N}\n" "$1" "────────────────────────────────────────────────────────────"; }
+# macOS: stat BSD, pas de --wrap/--whole-archive, symboles nm prefixes par "_", pas de timeout
+mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1"; }
+nmf() { if [ "$(uname)" = Darwin ]; then nm "$@" 2>/dev/null | sed -E 's/ _([A-Za-z_])/ \1/'; else nm "$@" 2>/dev/null; fi; }
+TO=$(command -v timeout || command -v gtimeout)
+to() { if [ -n "$TO" ]; then "$TO" "$@"; else shift; "$@"; fi; }
 check() { [ "$2" = 1 ] && printf "    %s %s\n" "$OKS" "$1" || printf "    %s %s\n" "$KOS" "$1"; }
 
 [ -f "$LIBFT/libft.h" ] || { echo "  $KOS libft.h introuvable dans $LIBFT"; exit 1; }
@@ -55,20 +60,20 @@ if ! make -C "$LIBFT" >/dev/null 2>"$DIR/.make.log"; then
 	echo "    $KOS make a echoue:"; sed 's/^/      /' "$DIR/.make.log"; exit 1
 fi
 [ -f "$LIBFT/libft.a" ] || { echo "    $KOS libft.a absent apres make"; exit 1; }
-grep -qE "^bonus\s*:" "$LIBFT/Makefile" && make -C "$LIBFT" bonus >/dev/null 2>&1
-nm "$LIBFT/libft.a" 2>/dev/null | awk -f "$DIR/externs.awk" > "$DIR/.externs"
+grep -qE "^bonus[[:space:]]*:" "$LIBFT/Makefile" && make -C "$LIBFT" bonus >/dev/null 2>&1
+nmf "$LIBFT/libft.a" | awk -f "$DIR/externs.awk" > "$DIR/.externs"
 # meme fonction definie dans 2 .o (ex: ft_toupper copie dans ft_tolower.c): on le signale et on linke quand meme
-nm -A "$LIBFT/libft.a" 2>/dev/null | awk '$(NF-1) == "T" { split($1, a, ":"); o[$NF] = o[$NF] " " a[2]; n[$NF]++ }
+nmf -A "$LIBFT/libft.a" | awk '$(NF-1) == "T" { split($1, a, ":"); o[$NF] = o[$NF] " " a[2]; n[$NF]++ }
 	END { for (f in n) if (n[f] > 1) print f ":" o[f] }' | while read -r dup; do
 	echo "    $KOS ${dup%%:*} defini plusieurs fois:${dup#*:} (une seule version sera testee)"
 done
 # fonctions ciblees: on saute les verifs Makefile / README pour aller vite
 if [ $TARGETED = 0 ]; then
-before=$(stat -c %Y "$LIBFT/libft.a"); sleep 1
+before=$(mtime "$LIBFT/libft.a"); sleep 1
 make -C "$LIBFT" >/dev/null 2>&1
-check "pas de relink" "$([ "$before" = "$(stat -c %Y "$LIBFT/libft.a")" ] && echo 1)"
+check "pas de relink" "$([ "$before" = "$(mtime "$LIBFT/libft.a")" ] && echo 1)"
 for rule in '\$\(NAME\)' all clean fclean re; do
-	check "regle ${rule//\\/}" "$(grep -qE "^${rule}\s*:" "$LIBFT/Makefile" && echo 1)"
+	check "regle ${rule//\\/}" "$(grep -qE "^${rule}[[:space:]]*:" "$LIBFT/Makefile" && echo 1)"
 done
 check "fonctions externes autorisees par le sujet (detail par fonction plus bas)" "$([ -s "$DIR/.externs" ] || echo 1)"
 check "flags -Wall -Wextra -Werror" "$(grep -q -- -Wall "$LIBFT/Makefile" && grep -q -- -Wextra "$LIBFT/Makefile" && grep -q -- -Werror "$LIBFT/Makefile" && echo 1)"
@@ -92,7 +97,13 @@ else
 fi
 fi
 
-cc -g -w tester.c -Wl,--allow-multiple-definition -Wl,--wrap=malloc -Wl,--wrap=free -Wl,--whole-archive "$LIBFT/libft.a" -Wl,--no-whole-archive -o tester 2>"$DIR/.make.log" \
+if [ "$(uname)" = Darwin ]; then
+	# shortcut: dynamic_lookup laisse linker une libft incomplete (fonction absente = NULL), non teste sur un vrai Mac
+	LINK=(-Wl,-undefined,dynamic_lookup -Wl,-force_load,"$LIBFT/libft.a")
+else
+	LINK=(-Wl,--allow-multiple-definition -Wl,--wrap=malloc -Wl,--wrap=free -Wl,--whole-archive "$LIBFT/libft.a" -Wl,--no-whole-archive)
+fi
+cc -g -w tester.c "${LINK[@]}" -o tester 2>"$DIR/.make.log" \
 	|| { echo "    $KOS compilation du tester echouee:"; sed 's/^/      /' "$DIR/.make.log"; exit 1; }
 
 VG=$(command -v valgrind)
@@ -126,9 +137,9 @@ for f in $FUNCS; do
 	nb=$((nb + 1))
 	if [[ "$VFUNCS" == *" $f "* ]]; then
 		printf "    ${B}%s${N} ${D}— entrees testees:${N}\n" "$f"
-		out=$(TESTER_VERBOSE=1 timeout 120 ./tester "$f"); rc=$?
+		out=$(TESTER_VERBOSE=1 to 120 ./tester "$f"); rc=$?
 	else
-		out=$(timeout 120 ./tester "$f" 2>/dev/null); rc=$?
+		out=$(to 120 ./tester "$f" 2>/dev/null); rc=$?
 	fi
 	read -r total failed crashes <<< "$out"
 	vg=""
@@ -145,7 +156,7 @@ for f in $FUNCS; do
 		# apres un crash les fuites du cas interrompu sont normales: on ne regarde que les acces invalides
 		leak="--leak-check=full --show-leak-kinds=definite,indirect --errors-for-leak-kinds=definite,indirect"
 		[ "$crashes" != 0 ] && leak="--leak-check=no"
-		TESTER_NOLOG=1 timeout 300 valgrind -q $leak --error-exitcode=42 --log-file="$DIR/.vg.log" \
+		TESTER_NOLOG=1 to 300 valgrind -q $leak --error-exitcode=42 --log-file="$DIR/.vg.log" \
 			./tester "$f" >/dev/null 2>&1
 		if [ $? = 42 ]; then
 			vg="${R}🐟 valgrind KO${N}"

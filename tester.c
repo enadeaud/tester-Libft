@@ -10,6 +10,7 @@
 #include <signal.h>
 #include <unistd.h>
 #include <setjmp.h>
+#include <fcntl.h>
 #if __has_include(<valgrind/valgrind.h>)
 # include <valgrind/valgrind.h>
 #else
@@ -117,7 +118,7 @@ FUNCS
 
 static const char	*g_fn;
 static char			g_cur[2048];
-static FILE			*g_log;
+static int			g_log = -1;	/* fd brut: le handler de signal ne doit jamais appeler malloc (heap peut-etre corrompu) */
 static sigjmp_buf	g_jmp;
 static int			g_case;		/* index du cas en cours (1..n) */
 static int			g_case_ko;
@@ -130,21 +131,23 @@ static int			g_nskip;
 static void	logmsg(const char *fmt, ...)
 {
 	va_list	ap;
-	char	path[256];
+	char	buf[4096];
+	int		n;
 
 	if (getenv("TESTER_NOLOG") || (g_case && g_case <= g_replay))
 		return ;
-	if (!g_log)
+	if (g_log < 0)
 	{
-		snprintf(path, sizeof path, "errors/%s.txt", g_fn);
-		g_log = fopen(path, "a");
-		if (!g_log)
+		snprintf(buf, sizeof buf, "errors/%s.txt", g_fn);
+		g_log = open(buf, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+		if (g_log < 0)
 			return ;
-		setvbuf(g_log, NULL, _IONBF, 0);
 	}
 	va_start(ap, fmt);
-	vfprintf(g_log, fmt, ap);
+	n = vsnprintf(buf, sizeof buf, fmt, ap);
 	va_end(ap);
+	if (n > 0)
+		write(g_log, buf, n < (int)sizeof buf ? n : (int)sizeof buf - 1);
 }
 
 static char			g_detail[4096];
@@ -224,6 +227,53 @@ static int	case_begin(const char *fmt, ...)
 	logmsg(__VA_ARGS__); logmsg("\n\n"); \
 	if (verbose()) { detail("          "); detail(__VA_ARGS__); detail("\n"); } } } while (0)
 
+/* un crash a pu corrompre le heap (malloc ne marcherait plus): on relance le tester
+ * dans un processus neuf, les cas deja crashes passes par TESTER_SKIP */
+static char	**g_argv;
+static char	g_skipenv[2048] = "TESTER_SKIP=";
+
+static void	reexec(void)
+{
+	size_t		j = strlen("TESTER_SKIP=");
+	sigset_t	none;
+
+	for (int i = 0; i < (g_nskip < 256 ? g_nskip : 0) && j < sizeof g_skipenv - 16; i++)
+		j += snprintf(g_skipenv + j, sizeof g_skipenv - j, "%d ", g_skip[i]);
+	if (g_nskip >= 256)
+		j += snprintf(g_skipenv + j, sizeof g_skipenv - j, "0");	/* 0 = abandon */
+	g_skipenv[j] = 0;
+	alarm(0);
+	sigemptyset(&none);
+	sigprocmask(SIG_SETMASK, &none, NULL);	/* le masque survit a exec: sinon un 2e SIGSEGV tuerait le process */
+	execv(g_argv[0], g_argv);
+}
+
+static void	load_skips(void)
+{
+	char	*p = getenv("TESTER_SKIP");
+	char	*end;
+	long	n;
+
+	while (p && *p)
+	{
+		n = strtol(p, &end, 10);
+		if (end == p)
+			break ;
+		p = end;
+		g_crashes++;
+		if (n == 0)
+			g_nskip = 256;
+		else if (g_nskip < 256)
+		{
+			g_skip[g_nskip++] = n;
+			if (n > g_replay)
+				g_replay = n;
+		}
+	}
+	strncat(g_skipenv, getenv("TESTER_SKIP") ? getenv("TESTER_SKIP") : "", sizeof g_skipenv - 13);
+	putenv(g_skipenv);	/* buffer statique: reexec() le reecrit sans malloc */
+}
+
 static void	on_signal(int sig)
 {
 	if (sig == SIGALRM)
@@ -241,6 +291,8 @@ static void	on_signal(int sig)
 		g_nskip = 256;	/* crash hors d'un cas: on abandonne */
 	else if (g_nskip < 256)
 		g_skip[g_nskip++] = g_case;
+	if (!RUNNING_ON_VALGRIND)
+		reexec();
 	siglongjmp(g_jmp, 1);
 }
 
@@ -1218,6 +1270,8 @@ int	main(int ac, char **av)
 		if (strcmp(av[1], g_tests[i].name))
 			continue ;
 		g_fn = g_tests[i].name;
+		g_argv = av;
+		load_skips();
 		if (!g_tests[i].fn)
 		{
 			logmsg("[MISSING] %s n'existe pas dans libft.a\n", g_fn);
@@ -1249,9 +1303,10 @@ int	main(int ac, char **av)
 		}
 		case_end();
 		alarm(0);
-		if (g_log)
-			fclose(g_log);
-		printf("%d %d %d\n", g_case, g_failed + g_crashes, g_crashes);
+		if (g_log >= 0)
+			close(g_log);
+		char	res[64];
+		write(1, res, snprintf(res, sizeof res, "%d %d %d\n", g_case, g_failed + g_crashes, g_crashes));
 		return (g_failed + g_crashes != 0);
 	}
 	fprintf(stderr, "usage: %s --list | ft_nom_fonction\n", av[0]);
